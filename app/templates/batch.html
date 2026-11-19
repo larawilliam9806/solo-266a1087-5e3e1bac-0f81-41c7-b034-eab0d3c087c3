@@ -35,4 +35,49 @@
   </table>
 </section>
 {% endif %}
+
+{% if delivery %}
+<section class="card">
+  <h2 style="margin-top:0;">研究 PACS 送达状态</h2>
+  {% if delivery.target %}
+    <p>目标：<code>{{ delivery.target.identity }}</code>（DICOM C-STORE，逐件发送 Explicit VR Little Endian 单帧 CT）</p>
+    <form method="post" action="{{ url_for('send_to_pacs', batch_id=batch.id) }}" style="margin-bottom:14px;">
+      <button class="btn" type="submit">发送到研究 PACS</button>
+      <span class="muted">已送达的同字节实例自动跳过；重试只补送未确认或失败的实例。</span>
+    </form>
+    {% if delivery.rows %}
+    <table>
+      <thead><tr><th>匿名 SOPInstanceUID</th><th>状态</th><th>DIMSE 状态</th><th>说明</th><th>更新时间</th></tr></thead>
+      <tbody>
+      {% for it in delivery.rows %}
+        <tr>
+          <td><code>{{ it.new_sop_uid }}</code></td>
+          <td class="send-{{ it.state }}">{{ it.label }}</td>
+          <td>{% if it.dimse_status is not none %}<code>0x{{ '%04X' | format(it.dimse_status) }}</code>{% else %}—{% endif %}</td>
+          <td>{{ it.message }}</td>
+          <td>{{ it.updated_at or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">下载包中没有可发送的单帧 CT。</p>
+    {% endif %}
+    {% if delivery.skipped %}
+      <p class="muted" style="margin-bottom:4px;">以下 {{ delivery.skipped | length }} 个成员不属于单帧 CT（Explicit VR LE），不发送：</p>
+      <ul class="muted" style="margin-top:0;">
+        {% for name, reason in delivery.skipped %}
+          <li>{{ name }} — {{ reason }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% else %}
+    {% if delivery.config_error %}
+      <div class="flash error">研究 PACS 配置非法：{{ delivery.config_error }}</div>
+    {% endif %}
+    <p class="muted">未配置研究 PACS。设置环境变量 <code>PACS_HOST</code>（及可选的
+      <code>PACS_PORT</code>、<code>PACS_AE_TITLE</code>、<code>PACS_CALLING_AE_TITLE</code>）后即可发送。</p>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}

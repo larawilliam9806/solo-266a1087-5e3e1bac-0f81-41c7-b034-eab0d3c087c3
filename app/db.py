@@ -56,8 +56,25 @@ CREATE TABLE IF NOT EXISTS batch_files (
     PRIMARY KEY (batch_id, sop_uid)
 );
 
+-- 研究 PACS 送达记录：按 (目标, 匿名 SOP UID) 唯一，跨批次生效。
+-- delivered 只在收到 C-STORE 成功响应并落库后出现；重启后依然有效。
+CREATE TABLE IF NOT EXISTS deliveries (
+    target        TEXT NOT NULL,              -- 目标标识 AET@host:port
+    new_sop_uid   TEXT NOT NULL,              -- 匿名化后的 SOPInstanceUID
+    sha256        TEXT NOT NULL DEFAULT '',   -- 发送文件（匿名化产物）字节 SHA-256
+    status        TEXT NOT NULL CHECK (status IN ('sending','delivered','rejected','unconfirmed')),
+    dimse_status  INTEGER,                    -- C-STORE 响应状态码（无响应为 NULL）
+    message       TEXT NOT NULL DEFAULT '',
+    batch_id      TEXT NOT NULL DEFAULT '',   -- 最近一次触发发送的批次
+    claim_token   TEXT NOT NULL DEFAULT '',   -- 本次发送运行令牌，防止跨进程并发发送
+    claimed_at    REAL NOT NULL DEFAULT 0,    -- 认领时间（epoch 秒），过期可被接管
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (target, new_sop_uid)
+);
+
 CREATE INDEX IF NOT EXISTS idx_batch_files_sop ON batch_files(sop_uid);
 CREATE INDEX IF NOT EXISTS idx_instances_sha  ON instances(sha256);
+CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status);
 """
 
 

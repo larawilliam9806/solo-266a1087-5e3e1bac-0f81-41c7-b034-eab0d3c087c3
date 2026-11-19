@@ -1,10 +1,12 @@
 """运行配置。所有路径与密钥前缀均可通过环境变量覆盖。
 
-路径类配置在访问时读取环境变量，便于测试在不重载模块的情况下隔离数据目录。
+路径类与 PACS 目标配置在访问时读取环境变量，便于测试在不重载模块的情况下
+隔离数据目录与接收端地址。
 """
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 # 允许上传的单请求总大小（默认 2GB）
@@ -99,3 +101,59 @@ def ensure_dirs() -> None:
         _paths.batches_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------- 研究 PACS
+@dataclass(frozen=True)
+class PacsTarget:
+    """C-STORE 接收方（研究 PACS）连接参数。"""
+
+    ae_title: str          # 接收方 Called AE Title
+    host: str
+    port: int
+    calling_ae_title: str  # 本服务 Calling AE Title
+
+    @property
+    def identity(self) -> str:
+        """目标标识：送达记录按此键隔离，换目标即换一套送达视图。"""
+        return f"{self.ae_title}@{self.host}:{self.port}"
+
+
+def _validate_ae_title(env_name: str, value: str) -> str:
+    if not value or len(value) > 16 or not value.isprintable():
+        raise ValueError(f"{env_name} 非法（1-16 个可打印字符）: {value!r}")
+    return value
+
+
+def get_pacs_target() -> PacsTarget | None:
+    """读取研究 PACS 配置；未设置 PACS_HOST 时返回 None（发送功能不可用）。"""
+    host = os.environ.get("PACS_HOST", "").strip()
+    if not host:
+        return None
+    ae_title = _validate_ae_title(
+        "PACS_AE_TITLE",
+        os.environ.get("PACS_AE_TITLE", "RESEARCH_PACS").strip() or "RESEARCH_PACS",
+    )
+    calling = _validate_ae_title(
+        "PACS_CALLING_AE_TITLE",
+        os.environ.get("PACS_CALLING_AE_TITLE", "DICOM_BATCH").strip() or "DICOM_BATCH",
+    )
+    port = int(os.environ.get("PACS_PORT", "11112"))
+    if not 1 <= port <= 65535:
+        raise ValueError(f"PACS_PORT 非法: {port}")
+    return PacsTarget(ae_title=ae_title, host=host, port=port, calling_ae_title=calling)
+
+
+def get_pacs_connect_timeout() -> float:
+    """TCP 连接 / 关联协商超时（秒）。"""
+    return float(os.environ.get("PACS_CONNECT_TIMEOUT", "10"))
+
+
+def get_pacs_dimse_timeout() -> float:
+    """等待 C-STORE 响应的 DIMSE 超时（秒）。"""
+    return float(os.environ.get("PACS_DIMSE_TIMEOUT", "30"))
+
+
+def get_send_claim_ttl() -> float:
+    """发送认领的有效期（秒）：过期认领视为发送方已崩溃，可被重试接管。"""
+    return float(os.environ.get("PACS_CLAIM_TTL_SECONDS", "300"))

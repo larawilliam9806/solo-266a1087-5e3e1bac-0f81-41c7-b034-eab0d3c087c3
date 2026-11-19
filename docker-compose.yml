@@ -12,8 +12,17 @@ services:
       MAX_CONTENT_LENGTH: "2147483648"
       SQLITE_BUSY_TIMEOUT_MS: "30000"
       FLASK_SECRET_KEY: "change-this-in-production"
+      # 研究 PACS（C-STORE 接收方）
+      PACS_HOST: "research-pacs"
+      PACS_PORT: "11112"
+      PACS_AE_TITLE: "RESEARCH_PACS"
+      PACS_CALLING_AE_TITLE: "DICOM_BATCH"
+      PACS_CONNECT_TIMEOUT: "10"
+      PACS_DIMSE_TIMEOUT: "30"
     volumes:
       - dicom_data:/data
+    depends_on:
+      - research-pacs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
@@ -22,5 +31,24 @@ services:
       retries: 5
       start_period: 10s
 
+  # 本机研究 PACS 模拟端：DICOM Storage SCP，接收 C-STORE 并按 SOPInstanceUID 落盘
+  research-pacs:
+    build: .
+    image: dicom-batch-processor:latest
+    container_name: research-pacs-scp
+    command: ["python", "-m", "app.scp_server"]
+    ports:
+      - "11112:11112"
+    environment:
+      SCP_AE_TITLE: "RESEARCH_PACS"
+      SCP_PORT: "11112"
+      SCP_STORAGE_DIR: "/scp_data"
+      # 设为 0xA700 可模拟 PACS 拒收，用于验证“拒收”状态流转
+      SCP_RESPONSE_STATUS: "0x0000"
+    volumes:
+      - scp_data:/scp_data
+    restart: unless-stopped
+
 volumes:
   dicom_data:
+  scp_data:

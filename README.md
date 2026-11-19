@@ -41,22 +41,60 @@
 5. **重试不变号**：确定性派生 + 映射表只插入不更新（`INSERT OR IGNORE`），重试绝不改变标识。
 6. **先落盘后入库**：对象文件 `fsync` + 原子 rename 后才写数据库记录。
 
+## 发送到研究 PACS（C-STORE）
+
+研究阅片站可直接接收已发布批次的副本。批次详情页（`ready` 批次）提供
+**“发送到研究 PACS”** 操作：
+
+- 从该批次的下载包中筛出 **Explicit VR Little Endian 单帧 CT**（CT Image Storage、
+  无 `NumberOfFrames` 或值为 1），逐件经 DICOM C-STORE 发往配置的研究 PACS；
+  非 CT、多帧、非 EVLE 成员不发送并在页面列出原因。
+- 页面按**匿名 SOPInstanceUID** 显示每件状态：**送达 / 拒收 / 未确认**
+  （另有“发送中”“冲突”两个瞬态/异常态）。
+- **送达判定**：收到 C-STORE 成功响应（0x0000）并把送达记录保存到 SQLite 后才算送达；
+  拒收（含警告状态码）与超时/断连分别记为“拒收”“未确认”。
+- **跨批次去重**：同一目标已送达过同号且文件字节相同的实例自动跳过；
+  已送达记录的同号实例字节不同时提示**冲突**并停止发送该实例（不影响其他实例）。
+- **并发互斥**：同一目标的同一实例不允许同时发送——认领在 IMMEDIATE 事务内完成，
+  结果回写须匹配认领令牌；崩溃遗留的认领过期（默认 300s）后才能被接管。
+- **重试语义**：重试只补送未确认或失败的实例；送达记录持久化，
+  服务重启后仍按已保存记录判断。
+- **故障隔离**：发送期间不持有数据库事务，连接失败/超时期间原批次仍可下载、
+  新批次仍可发布。
+
+送达记录保存于 `deliveries` 表，按目标标识 `AET@host:port` 隔离；更换目标即更换送达视图。
+
+### 本机研究 PACS 模拟端
+
+`app/scp_server.py` 是一个 Storage SCP：接受全部 Storage SOP Class 的 C-STORE，
+按 SOPInstanceUID 落盘，并支持 C-ECHO。docker compose 已配置 `research-pacs`
+服务随栈启动：
+
+```bash
+docker compose up --build
+# 应用 http://localhost:8000 ，接收端监听 11112 端口，接收文件在 scp_data 卷
+```
+
+将 `research-pacs` 服务的 `SCP_RESPONSE_STATUS` 设为 `0xA700` 可模拟 PACS 拒收。
+
 ## 目录结构
 
 ```
 app/
-  config.py        环境变量配置（数据目录、UID 前缀、上传大小、SQLite 超时）
+  config.py        环境变量配置（数据目录、UID 前缀、上传大小、SQLite 超时、研究 PACS）
   db.py            SQLite 连接、WAL、建表、中断恢复
   identifiers.py   确定性 UID / PatientID 派生
   dicom_proc.py    DICOM 校验、标识收集、映射、匿名化重标识、对象落盘
   services.py      批次编排、zip 原子打包、CSV 清单、状态机
+  pacs.py          研究 PACS 发送：下载包筛选、认领互斥、C-STORE、送达记录
+  scp_server.py    本机研究 PACS 模拟端（Storage SCP，接收落盘）
   web.py           Flask 路由与应用工厂
   wsgi.py          gunicorn 入口
   templates/       上传页、批次详情页
 samples/
   generate_samples.py  合成样例生成器（含跨文件引用）
   data/                生成的 4 个样例 DICOM
-tests/             pytest 测试（含多进程并发与中断恢复）
+tests/             pytest 测试（含多进程并发、中断恢复与 PACS 发送）
 Dockerfile
 docker-compose.yml
 ```
@@ -86,7 +124,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 # 生成含跨文件引用的合成样例
 python samples/generate_samples.py
 
-# 运行测试（15 个，含多进程并发）
+# 运行测试（31 个，含多进程并发与 PACS 发送）
 pytest -q
 
 # 本地启动
@@ -102,6 +140,17 @@ DICOM_DATA_DIR=./data python -m flask --app app.wsgi:app run --debug
 | `MAX_CONTENT_LENGTH` | `2147483648`（2GB） | 单请求上传上限（字节） |
 | `SQLITE_BUSY_TIMEOUT_MS` | `30000` | SQLite 写锁等待 |
 | `FLASK_SECRET_KEY` | 开发占位 | 会话密钥，生产必须替换 |
+| `PACS_HOST` | 空（未配置） | 研究 PACS 主机；不设置则发送功能不可用 |
+| `PACS_PORT` | `11112` | 研究 PACS 端口 |
+| `PACS_AE_TITLE` | `RESEARCH_PACS` | 接收方 Called AE Title |
+| `PACS_CALLING_AE_TITLE` | `DICOM_BATCH` | 本服务 Calling AE Title |
+| `PACS_CONNECT_TIMEOUT` | `10` | TCP 连接/关联协商超时（秒） |
+| `PACS_DIMSE_TIMEOUT` | `30` | 等待 C-STORE 响应超时（秒） |
+| `PACS_CLAIM_TTL_SECONDS` | `300` | 发送认领有效期，过期可被重试接管 |
+
+模拟接收端（`python -m app.scp_server`）环境变量：`SCP_AE_TITLE`（`RESEARCH_PACS`）、
+`SCP_HOST`（`0.0.0.0`）、`SCP_PORT`（`11112`）、`SCP_STORAGE_DIR`（`./scp_incoming`）、
+`SCP_RESPONSE_STATUS`（`0x0000`，可设 `0xA700` 模拟拒收）。
 
 ## HTTP 接口
 
@@ -109,8 +158,9 @@ DICOM_DATA_DIR=./data python -m flask --app app.wsgi:app run --debug
 | --- | --- | --- |
 | GET | `/` | 上传表单与批次列表 |
 | POST | `/upload` | multipart 多文件上传并同步处理，重定向到批次详情 |
-| GET | `/batches/<id>` | 批次状态、错误信息、文件清单 |
+| GET | `/batches/<id>` | 批次状态、错误信息、文件清单、研究 PACS 送达状态 |
 | GET | `/batches/<id>/download` | 下载整批 zip（仅 `ready` 可用，否则 409） |
+| POST | `/batches/<id>/send` | 把该批次下载包中的单帧 CT 经 C-STORE 发往研究 PACS |
 | GET | `/healthz` | 健康检查 |
 
 下载的 zip 内含处理后的 DICOM（以新 SOP UID 命名）与 `manifest.csv`，

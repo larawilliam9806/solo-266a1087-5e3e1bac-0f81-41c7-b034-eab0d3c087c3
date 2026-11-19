@@ -15,7 +15,7 @@ from flask import (
     url_for,
 )
 
-from . import config, services
+from . import config, pacs, services
 from .db import get_db, init_db, recover_interrupted_batches
 
 
@@ -26,6 +26,7 @@ def create_app() -> Flask:
 
     init_db()
     recover_interrupted_batches()
+    pacs.recover_stale_send_claims()
 
     @app.get("/")
     def index():
@@ -67,7 +68,26 @@ def create_app() -> Flask:
             ).fetchall()
         finally:
             conn.close()
-        return render_template("batch.html", batch=batch, files=files)
+        return render_template(
+            "batch.html", batch=batch, files=files,
+            delivery=pacs.batch_delivery_view(batch),
+        )
+
+    @app.post("/batches/<batch_id>/send")
+    def send_to_pacs(batch_id: str):
+        batch = services.get_batch(batch_id)
+        if batch is None:
+            abort(404)
+        try:
+            summary = pacs.send_batch(batch_id)
+        except (pacs.PacsNotConfigured, pacs.BatchNotReady) as exc:
+            flash(str(exc), "error")
+        except Exception as exc:  # noqa: BLE001
+            app.logger.exception("批次 %s 发送研究 PACS 异常", batch_id)
+            flash(f"发送失败: {exc}", "error")
+        else:
+            flash(summary.message(), "ok" if summary.ok else "error")
+        return redirect(url_for("batch_detail", batch_id=batch_id))
 
     @app.get("/batches/<batch_id>/download")
     def download(batch_id: str):

@@ -5,6 +5,7 @@ __pycache__/
 venv/
 # 运行时数据目录（与仓库自带的合成样例 samples/data 区分）
 /data/
+/scp_incoming/
 *.db
 *.db-wal
 *.db-shm
